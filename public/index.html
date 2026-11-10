@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chat agent</title>
+<style>
+  :root { --bg:#fafaf9; --fg:#1c1917; --mut:#78716c; --line:#e7e5e4; --me:#1c1917; --meFg:#fff; --card:#fff; --acc:#2563eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#e7e5e4; --mut:#a8a29e; --line:#2b2a28; --me:#e7e5e4; --meFg:#141413; --card:#1c1b1a; --acc:#60a5fa; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif; height:100dvh; display:flex; flex-direction:column; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
+  header b { font-weight:600; }
+  button { font:inherit; cursor:pointer; }
+  .ghost { background:none; border:1px solid var(--line); color:var(--mut); border-radius:8px; padding:4px 10px; }
+  main { flex:1; overflow-y:auto; padding:20px 16px; }
+  .wrap { max-width:720px; margin:0 auto; display:flex; flex-direction:column; gap:16px; }
+  .msg { max-width:100%; }
+  .user { align-self:flex-end; background:var(--me); color:var(--meFg); padding:8px 14px; border-radius:16px 16px 4px 16px; max-width:85%; white-space:pre-wrap; }
+  .bot { align-self:flex-start; width:100%; }
+  .bot p { margin:0 0 10px; } .bot ul,.bot ol { margin:0 0 10px; padding-left:22px; }
+  .bot a { color:var(--acc); } .bot code { background:var(--line); padding:1px 5px; border-radius:4px; font-size:13px; }
+  .bot table { border-collapse:collapse; margin:0 0 10px; font-size:14px; } .bot th,.bot td { border:1px solid var(--line); padding:4px 8px; text-align:left; }
+  .status { color:var(--mut); font-size:13px; display:flex; flex-direction:column; gap:2px; margin-bottom:8px; }
+  .status .q::before { content:"🔎 "; }
+  .src { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .src a { font-size:12px; color:var(--mut); border:1px solid var(--line); background:var(--card); border-radius:999px; padding:2px 10px; text-decoration:none; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .err { color:#dc2626; }
+  .dots::after { content:"…"; animation:b 1s infinite; } @keyframes b { 50% { opacity:.2 } }
+  form { border-top:1px solid var(--line); padding:12px 16px; }
+  .row { max-width:720px; margin:0 auto; display:flex; gap:8px; align-items:flex-end; }
+  textarea { flex:1; resize:none; font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 12px; max-height:160px; outline:none; }
+  textarea:focus { border-color:var(--acc); }
+  #send { background:var(--me); color:var(--meFg); border:0; border-radius:12px; padding:10px 16px; }
+  #send:disabled { opacity:.5; cursor:default; }
+  .hello { color:var(--mut); text-align:center; margin-top:12vh; } .hello div { margin-top:8px; font-size:13px; }
+</style>
+</head>
+<body>
+<header><b>Chat agent</b><button class="ghost" id="new">New chat</button></header>
+<main id="main"><div class="wrap" id="log">
+  <div class="hello" id="hello">Ask me anything. I search the web and remember our past chats.<div>Try: “Has anything changed with Postgres hosting pricing since last Tuesday?”</div></div>
+</div></main>
+<form id="form"><div class="row">
+  <textarea id="input" rows="1" placeholder="Message…" autofocus></textarea>
+  <button id="send" type="submit">Send</button>
+</div></form>
+<script>
+const $ = (s) => document.querySelector(s);
+const log = $("#log"), main = $("#main"), input = $("#input"), send = $("#send");
+const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+let convId = localStorage.getItem("convId") || "";
+let busy = false;
+
+const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+function inline(s) {
+  return esc(s)
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+// Tiny markdown: paragraphs, lists, tables, bold, code, links. Enough for chat answers.
+function md(text) {
+  const blocks = text.split(/\n{2,}/), out = [];
+  for (const b of blocks) {
+    const lines = b.split("\n");
+    if (lines.every((l) => /^\s*[-*]\s+/.test(l))) out.push("<ul>" + lines.map((l) => "<li>" + inline(l.replace(/^\s*[-*]\s+/, "")) + "</li>").join("") + "</ul>");
+    else if (lines.every((l) => /^\s*\d+[.)]\s+/.test(l))) out.push("<ol>" + lines.map((l) => "<li>" + inline(l.replace(/^\s*\d+[.)]\s+/, "")) + "</li>").join("") + "</ol>");
+    else if (lines.length > 1 && lines.every((l) => l.trim().startsWith("|"))) {
+      const rows = lines.filter((l) => !/^\s*\|[\s:|-]+\|\s*$/.test(l)).map((l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => inline(c.trim())));
+      out.push("<table>" + rows.map((r, i) => "<tr>" + r.map((c) => (i ? "<td>" : "<th>") + c + (i ? "</td>" : "</th>")).join("") + "</tr>").join("") + "</table>");
+    } else out.push("<p>" + lines.map(inline).join("<br>") + "</p>");
+  }
+  return out.join("");
+}
+function add(cls, html) { const d = document.createElement("div"); d.className = "msg " + cls; d.innerHTML = html; log.appendChild(d); return d; }
+const scroll = () => { main.scrollTop = main.scrollHeight; };
+
+async function loadHistory() {
+  if (!convId) return;
+  const r = await fetch("/api/conversation/" + convId).then((r) => r.json()).catch(() => []);
+  if (r.length) $("#hello")?.remove();
+  for (const m of r) m.role === "user" ? add("user", esc(m.content)) : add("bot", md(m.content));
+  scroll();
+}
+
+async function ask(text) {
+  busy = true; send.disabled = true; $("#hello")?.remove();
+  add("user", esc(text));
+  const bot = add("bot", ""); const status = document.createElement("div"); status.className = "status";
+  const body = document.createElement("div"); const srcs = document.createElement("div");
+  bot.append(status, body, srcs);
+  const think = document.createElement("div"); think.className = "dots"; think.style.color = "var(--mut)"; status.appendChild(think);
+  let answer = "";
+  try {
+    const res = await fetch("/api/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: text, conversationId: convId || undefined, tz }) });
+    if (!res.ok || !res.body) throw new Error("Request failed (" + res.status + ")");
+    const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i; while ((i = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const line = chunk.split("\n").find((l) => l.startsWith("data:")); if (!line) continue;
+        const e = JSON.parse(line.slice(5));
+        if (e.type === "meta") { convId = e.conversationId; localStorage.setItem("convId", convId); }
+        else if (e.type === "status") think.textContent = e.message, think.className = "";
+        else if (e.type === "search") { const q = document.createElement("div"); q.className = "q"; q.textContent = e.query + (e.since ? "  (since " + e.since + ")" : ""); status.insertBefore(q, think); }
+        else if (e.type === "text") { answer += e.delta; body.innerHTML = md(answer); think.remove(); }
+        else if (e.type === "sources") srcs.className = "src", srcs.innerHTML = e.sources.slice(0, 8).map((s) => '<a target="_blank" rel="noopener noreferrer" href="' + esc(s.url) + '" title="' + esc(s.title) + '">' + esc(new URL(s.url).hostname.replace(/^www\./, "")) + "</a>").join("");
+        else if (e.type === "error") body.innerHTML += '<p class="err">Something went wrong: ' + esc(e.message) + "</p>";
+        scroll();
+      }
+    }
+  } catch (err) { body.innerHTML += '<p class="err">' + esc(err.message) + "</p>"; }
+  think.remove(); busy = false; send.disabled = false; input.focus(); scroll();
+}
+
+$("#form").addEventListener("submit", (e) => { e.preventDefault(); const t = input.value.trim(); if (!t || busy) return; input.value = ""; input.style.height = "auto"; ask(t); });
+input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#form").requestSubmit(); } });
+input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; });
+$("#new").addEventListener("click", () => { if (busy) return; convId = ""; localStorage.removeItem("convId"); log.innerHTML = ""; location.reload(); });
+loadHistory();
+</script>
+</body>
+</html>
